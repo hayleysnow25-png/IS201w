@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Hoe Waʻa — The Channel Race</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Lato:wght@300;400;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0b3d91; }
+    canvas { display: block; }
+    #backLink {
+      position: fixed; top: 14px; left: 16px;
+      color: #f7f3e9; font-family: 'Lato', sans-serif;
+      font-size: 13px; font-weight: 700;
+      background: rgba(11,61,145,0.78);
+      padding: 7px 15px; border-radius: 22px;
+      text-decoration: none; z-index: 10;
+      letter-spacing: 0.5px;
+      border: 1px solid rgba(255,255,255,0.22);
+      transition: background 0.2s;
+    }
+    #backLink:hover { background: rgba(11,61,145,0.97); }
+    #instructions {
+      position: fixed; bottom: 14px; left: 50%;
+      transform: translateX(-50%);
+      color: rgba(247,243,233,0.5); font-family: 'Lato', sans-serif;
+      font-size: 12px; letter-spacing: 0.5px;
+      pointer-events: none; z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <a id="backLink" href="fromscratch.html">← Back to Hoe Waʻa</a>
+  <div id="instructions">↑↓ / W S &nbsp;steer &nbsp;|&nbsp; ←→ / A D &nbsp;paddle forward &amp; back</div>
+
+  <script>
+  // ============================================================
+  //  HOE WAʻA — THE CHANNEL RACE
+  //  Single-file HTML5 Canvas endless runner
+  //  Hawaiian outrigger canoe — Kaiwi Channel crossing
+  // ============================================================
+
+  const canvas = document.getElementById('gameCanvas');
+  const ctx    = canvas.getContext('2d');
+  const TAU    = Math.PI * 2;
+
+  // ── Color Palette ──────────────────────────────────────────
+  const C = {
+    ocean:  '#0b3d91', teal:  '#00adb5', gold:   '#f0a500',
+    sand:   '#f7f3e9', dark:  '#2c3e50', white:  '#ffffff',
+  };
+
+  // Sky color phases [topColor, midColor, horizonColor] — cycles with score
+  const SKY = [
+    ['#0d1033', '#c85a2a', '#f0a500'],   // dawn
+    ['#1565c0', '#42a5f5', '#90caf9'],   // midday
+    ['#0b2060', '#e05a20', '#f6c030'],   // sunset
+  ];
+
+  // ── State ──────────────────────────────────────────────────
+  let state      = 'START';  // 'START' | 'PLAYING' | 'GAMEOVER'
+  let score      = 0;
+  let best       = parseInt(localStorage.getItem('hoewaa_best') || '0');
+  let speed      = 3.2;
+  let scoreTick  = 0;
+  let waveOff    = 0;
+  let padAngle   = 0;
+  let rbTimer    = 0;   // rainbow timer (ms accumulator)
+  let rbAlpha    = 0;
+  let lastTS     = 0;
+
+  // ── Player ─────────────────────────────────────────────────
+  const P = {
+    x: 0, y: 0, vx: 0, vy: 0,
+    hullHitW: 120, hullHitH: 20,   // main hull hitbox
+    amaHitW:  108, amaHitH:  10,   // ama (outrigger) hitbox — 47px below hull center
+    minX: 0, maxX: 0, minY: 0, maxY: 0,
+  };
+
+  // ── Input ──────────────────────────────────────────────────
+  const keys = { up: false, down: false, left: false, right: false };
+  let touchY0 = null;
+  let touchX0 = null;
+
+  // ── Clouds ─────────────────────────────────────────────────
+  let clouds = [];
+
+  // ── Game Objects ───────────────────────────────────────────
+  let obstacles    = [];
+  let collectibles = [];
+  let particles    = [];
+  let lastSpawnY   = -999;
+  const spawner    = { t: 0, interval: 120 };
+
+  // ── Resize ─────────────────────────────────────────────────
+  function resize() {
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+    P.minX = canvas.width  * 0.08;
+    P.maxX = canvas.width  * 0.38;
+    // minY anchored to wave surface (WAVES[0].yF = 0.44) so canoe stays in water
+    P.minY = canvas.height * 0.46;
+    P.maxY = canvas.height * 0.78;
+    if (P.x === 0) P.x = canvas.width  * 0.17;
+    if (P.y === 0) P.y = canvas.height * 0.54;
+    P.x = clamp(P.x, P.minX, P.maxX);
+    P.y = clamp(P.y, P.minY, P.maxY);
+    initClouds();
+  }
+
+  function initClouds() {
+    clouds = Array.from({ length: 6 }, () => ({
+      x: Math.random() * canvas.width,
+      y: canvas.height * (0.04 + Math.random() * 0.16),
+      r: 25 + Math.random() * 22,
+      s: 0.3 + Math.random() * 0.35,
+    }));
+  }
+
+  // ── Helpers ────────────────────────────────────────────────
+  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+  function lerpHex(a, b, t) {
+    const p = s => parseInt(s, 16);
+    const r = Math.round(p(a.slice(1,3)) + (p(b.slice(1,3)) - p(a.slice(1,3))) * t);
+    const g = Math.round(p(a.slice(3,5)) + (p(b.slice(3,5)) - p(a.slice(3,5))) * t);
+    const bv= Math.round(p(a.slice(5,7)) + (p(b.slice(5,7)) - p(a.slice(5,7))) * t);
+    return `rgb(${r},${g},${bv})`;
+  }
+
+  function skyColors() {
+    const ph = Math.floor(score / 300) % 3;
+    const nx = (ph + 1) % 3;
+    const t  = (score % 300) / 300;
+    return SKY[ph].map((c, i) => lerpHex(c, SKY[nx][i], t));
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y,     x + w, y + r);
+    ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x,     y + h, x,     y + h - r);
+    ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  // ── Draw: Sky + Sun ────────────────────────────────────────
+  function drawSky() {
+    const [top, mid, hor] = skyColors();
+    const skyH = canvas.height * 0.56;
+    const g = ctx.createLinearGradient(0, 0, 0, skyH);
+    g.addColorStop(0,   top);
+    g.addColorStop(0.5, mid);
+    g.addColorStop(1,   hor);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, skyH);
+  }
+
+  function drawSun() {
+    const t  = (score % 300) / 300;
+    const sx = canvas.width  * (0.14 + t * 0.72);
+    const sy = canvas.height * 0.14;
+    const rg = ctx.createRadialGradient(sx, sy, 0, sx, sy, 60);
+    rg.addColorStop(0,   'rgba(255,255,200,1)');
+    rg.addColorStop(0.3, 'rgba(255,215,40,0.85)');
+    rg.addColorStop(0.7, 'rgba(240,140,0,0.35)');
+    rg.addColorStop(1,   'rgba(240,80,0,0)');
+    ctx.fillStyle = rg;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 60, 0, TAU);
+    ctx.fill();
+  }
+
+  function drawIsland() {
+    // Distant island silhouette that slowly drifts
+    const drift = (waveOff * 0.08) % (canvas.width * 1.4);
+    const ix = canvas.width * 0.6 - drift;
+    const iy = canvas.height * 0.46;
+    ctx.save();
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = '#1a3520';
+    ctx.beginPath();
+    ctx.moveTo(ix,       iy);
+    ctx.bezierCurveTo(ix+30,  iy-30, ix+80,  iy-50, ix+120, iy-32);
+    ctx.bezierCurveTo(ix+160, iy-14, ix+200, iy-28, ix+240, iy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawClouds() {
+    clouds.forEach(c => {
+      ctx.save();
+      ctx.globalAlpha = 0.72;
+      ctx.fillStyle = C.sand;
+      [
+        [0,      0,      c.r],
+        [-c.r*0.68, c.r*0.28, c.r*0.66],
+        [ c.r*0.68, c.r*0.28, c.r*0.66],
+      ].forEach(([dx, dy, r]) => {
+        ctx.beginPath();
+        ctx.arc(c.x + dx, c.y + dy, r, 0, TAU);
+        ctx.fill();
+      });
+      ctx.restore();
+    });
+  }
+
+  // ── Draw: Ocean Waves ──────────────────────────────────────
+  const WAVES = [
+    { yF: 0.44, amp: 20, freq: 0.017, cTop: '#00adb5', cBot: '#0b3d91', sM: 1.0 },
+    { yF: 0.51, amp: 13, freq: 0.026, cTop: '#0d5c7a', cBot: '#07296a', sM: 1.7 },
+  ];
+
+  function drawWave(w) {
+    const yB = w.yF * canvas.height;
+    const g  = ctx.createLinearGradient(0, yB - w.amp, 0, canvas.height);
+    g.addColorStop(0, w.cTop);
+    g.addColorStop(1, w.cBot);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(0, yB + Math.sin(waveOff * w.freq) * w.amp);
+    for (let x = 4; x <= canvas.width; x += 4) {
+      ctx.lineTo(x, yB + Math.sin((x + waveOff * w.sM) * w.freq) * w.amp);
+    }
+    ctx.lineTo(canvas.width, canvas.height);
+    ctx.lineTo(0, canvas.height);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // ── Draw: Rainbow ──────────────────────────────────────────
+  function drawRainbow() {
+    if (rbAlpha <= 0.01) return;
+    const cx = canvas.width  * 0.5;
+    const cy = canvas.height * 0.52;
+    const colors = ['#ff4444','#ff8800','#ffee00','#44cc44','#4488ff','#8833ff'];
+    ctx.save();
+    colors.forEach((c, i) => {
+      ctx.globalAlpha = rbAlpha * 0.5;
+      ctx.strokeStyle = c;
+      ctx.lineWidth   = 11;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 175 + i * 14, Math.PI, 0);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  // ── Draw: Canoe ────────────────────────────────────────────
+  function drawHull(dark, light, scaleY = 1) {
+    ctx.save();
+    ctx.scale(1, scaleY);
+    const g = ctx.createLinearGradient(0, -10, 0, 10);
+    g.addColorStop(0, light); g.addColorStop(1, dark);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(-64, 0);
+    ctx.bezierCurveTo(-64, -11, 64, -11, 64, 0);
+    ctx.bezierCurveTo(64,  11, -64, 11, -64, 0);
+    ctx.closePath();
+    ctx.fill();
+    // Sheen
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.strokeStyle = '#ffe0b0';
+    ctx.lineWidth   = 2;
+    ctx.beginPath();
+    ctx.moveTo(-50, -5);
+    ctx.bezierCurveTo(-25, -8, 25, -8, 50, -5);
+    ctx.stroke();
+    ctx.restore();
+    ctx.restore();
+  }
+
+  function drawCanoe(x, y) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    // Wake
+    for (let i = 0; i < 7; i++) {
+      ctx.save();
+      ctx.globalAlpha = 0.28 - i * 0.035;
+      ctx.fillStyle   = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(-68 - i * 9, (Math.sin(waveOff * 0.3 + i) * 4), 3.5, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ʻIako spars (hull → ama)
+    ctx.strokeStyle = '#5c3317';
+    ctx.lineWidth   = 3;
+    ctx.beginPath(); ctx.moveTo(-26, 7);  ctx.lineTo(-26, 40); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo( 22, 7);  ctx.lineTo( 22, 40); ctx.stroke();
+
+    // Ama (outrigger float)
+    ctx.save();
+    ctx.translate(0, 47);
+    drawHull('#5c2a0e', '#7a3818', 0.52);
+    ctx.restore();
+
+    // Main hull
+    drawHull('#7a3010', '#b85020');
+
+    // Paddle (animated)
+    ctx.save();
+    ctx.translate(32, 2);
+    ctx.rotate(Math.sin(padAngle) * 0.5 - 0.15);
+    ctx.strokeStyle = '#5c3317';
+    ctx.lineWidth   = 3;
+    ctx.beginPath(); ctx.moveTo(0, -6); ctx.lineTo(0, 34); ctx.stroke();
+    ctx.fillStyle = '#7a3818';
+    ctx.beginPath();
+    ctx.ellipse(0, 44, 7, 15, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  // ── Draw: Obstacles ────────────────────────────────────────
+  function drawObstacle(o) {
+    ctx.save();
+    ctx.translate(o.x, o.y);
+
+    if (o.type === 'wave') {
+      const h = o.h, w = o.w;
+      const g = ctx.createLinearGradient(0, 0, 0, -h);
+      g.addColorStop(0,   '#00adb5');
+      g.addColorStop(0.6, '#b0ecf5');
+      g.addColorStop(1,   '#ffffff');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(-w/2, 8);
+      ctx.quadraticCurveTo(-w/4, -h*0.45, 0, -h);
+      ctx.quadraticCurveTo( w/4, -h*0.45, w/2,  8);
+      ctx.closePath();
+      ctx.fill();
+      // Foam crown
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.beginPath();
+      ctx.arc(0, -h, 9, 0, TAU);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(-10, -h + 6, 6, 0, TAU);
+      ctx.arc( 10, -h + 6, 6, 0, TAU);
+      ctx.fill();
+
+    } else if (o.type === 'jellyfish') {
+      // Bell
+      const rg = ctx.createRadialGradient(0, -4, 2, 0, -4, 24);
+      rg.addColorStop(0, 'rgba(230,110,210,0.92)');
+      rg.addColorStop(1, 'rgba(130,40,190,0.38)');
+      ctx.fillStyle = rg;
+      ctx.beginPath();
+      ctx.arc(0, 0, 24, Math.PI, 0);
+      ctx.closePath();
+      ctx.fill();
+      // Dome highlight
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(-6, -10, 10, Math.PI * 1.1, Math.PI * 1.85);
+      ctx.fill();
+      ctx.restore();
+      // Tentacles
+      ctx.strokeStyle = 'rgba(190,70,170,0.6)';
+      ctx.lineWidth = 2;
+      for (let t = 0; t < 5; t++) {
+        const tx = -16 + t * 8;
+        const wave = waveOff * 0.05 + t * 1.2;
+        ctx.beginPath();
+        ctx.moveTo(tx, 8);
+        ctx.quadraticCurveTo(tx + Math.sin(wave) * 9, 22, tx + Math.sin(wave + 1.1) * 7, 36);
+        ctx.stroke();
+      }
+
+    } else if (o.type === 'shark') {
+      // Body
+      const sg = ctx.createLinearGradient(0, -8, 0, 14);
+      sg.addColorStop(0, '#4a6e80');
+      sg.addColorStop(1, '#2c4a5a');
+      ctx.fillStyle = sg;
+      ctx.beginPath();
+      ctx.moveTo(-30, 7);
+      ctx.bezierCurveTo(-30, -8, 30, -8, 30, 7);
+      ctx.bezierCurveTo(30, 16, -30, 16, -30, 7);
+      ctx.closePath();
+      ctx.fill();
+      // Belly
+      ctx.fillStyle = 'rgba(200,220,225,0.55)';
+      ctx.beginPath();
+      ctx.ellipse(2, 10, 20, 5, 0, 0, TAU);
+      ctx.fill();
+      // Dorsal fin
+      ctx.fillStyle = '#3a5e70';
+      ctx.beginPath();
+      ctx.moveTo(2, -8);
+      ctx.lineTo(14, -30);
+      ctx.lineTo(20, -8);
+      ctx.closePath();
+      ctx.fill();
+      // Eye
+      ctx.fillStyle = '#000';
+      ctx.beginPath(); ctx.arc(20, 2, 3.5, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(21, 1, 1.4, 0, TAU); ctx.fill();
+      // Tail
+      ctx.fillStyle = '#3a5e70';
+      ctx.beginPath();
+      ctx.moveTo(-30, 7);
+      ctx.lineTo(-44, -5);
+      ctx.lineTo(-44, 18);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // ── Draw: Collectibles ─────────────────────────────────────
+  function drawCollectible(c) {
+    ctx.save();
+    ctx.translate(c.x, c.y + Math.sin(waveOff * 0.06 + c.x * 0.01) * 5);
+
+    if (c.type === 'lei') {
+      const pColors = ['#f0a500','#ff6b9d','#ff8c42','#ffe066','#ff4488','#ffd700'];
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * TAU;
+        ctx.fillStyle = pColors[i % pColors.length];
+        ctx.beginPath();
+        ctx.arc(Math.cos(a) * 17, Math.sin(a) * 17, 6.5, 0, TAU);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#fff8e0';
+      ctx.beginPath(); ctx.arc(0, 0, 5.5, 0, TAU); ctx.fill();
+      ctx.fillStyle = C.gold;
+      ctx.beginPath(); ctx.arc(0, 0, 3, 0, TAU); ctx.fill();
+
+    } else { // fish
+      ctx.fillStyle = '#f0a500';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 14, 8, 0, 0, TAU);
+      ctx.fill();
+      // Scales hint
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.strokeStyle = '#c07800';
+      ctx.lineWidth = 1;
+      for (let s = -6; s <= 6; s += 6) {
+        ctx.beginPath();
+        ctx.arc(s, 0, 5, -Math.PI * 0.5, Math.PI * 0.5);
+        ctx.stroke();
+      }
+      ctx.restore();
+      // Tail
+      ctx.fillStyle = '#d08800';
+      ctx.beginPath();
+      ctx.moveTo(-14, 0);
+      ctx.lineTo(-23, -8);
+      ctx.lineTo(-23, 8);
+      ctx.closePath();
+      ctx.fill();
+      // Fin
+      ctx.fillStyle = '#e09400';
+      ctx.beginPath();
+      ctx.moveTo(-2, -8);
+      ctx.lineTo(4, -14);
+      ctx.lineTo(8, -8);
+      ctx.closePath();
+      ctx.fill();
+      // Eye
+      ctx.fillStyle = '#000';
+      ctx.beginPath(); ctx.arc(9, -2, 2.8, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(10, -2.5, 1.2, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // ── Draw: Particles ────────────────────────────────────────
+  function drawParticles() {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 19px "Lato", sans-serif';
+    particles.forEach(p => {
+      ctx.globalAlpha = p.life / p.maxLife;
+      ctx.fillStyle   = p.color;
+      ctx.fillText(p.text, p.x, p.y);
+    });
+    ctx.restore();
+  }
+
+  // ── Draw: HUD ──────────────────────────────────────────────
+  function drawHUD() {
+    const rx = canvas.width - 172, ry = 12, rw = 160, rh = 64;
+    ctx.fillStyle = 'rgba(7,41,106,0.68)';
+    roundRect(rx, ry, rw, rh, 9);
+    ctx.fill();
+
+    ctx.textAlign = 'right';
+    ctx.font = '11px "Lato", sans-serif';
+    ctx.fillStyle = 'rgba(247,243,233,0.6)';
+    ctx.fillText('SCORE', canvas.width - 16, ry + 20);
+
+    ctx.font = 'bold 28px "Lato", sans-serif';
+    ctx.fillStyle = C.gold;
+    ctx.fillText(score, canvas.width - 16, ry + 46);
+
+    ctx.font = '11px "Lato", sans-serif';
+    ctx.fillStyle = 'rgba(247,243,233,0.45)';
+    ctx.fillText(`BEST  ${best}`, canvas.width - 16, ry + 64);
+  }
+
+  // ── Draw: Overlay screens ──────────────────────────────────
+  function drawStart() {
+    const cw = canvas.width, ch = canvas.height;
+    const bw = Math.min(480, cw - 40), bh = 300;
+    const bx = (cw - bw) / 2, by = (ch - bh) / 2;
+
+    ctx.fillStyle = 'rgba(7,41,106,0.90)';
+    roundRect(bx, by, bw, bh, 14); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,173,181,0.55)';
+    ctx.lineWidth = 2;
+    roundRect(bx, by, bw, bh, 14); ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.font = 'bold italic 44px "Playfair Display", serif';
+    ctx.fillStyle = C.gold;
+    ctx.fillText('Hoe Waʻa', cw/2, by + 64);
+
+    ctx.font = '15px "Lato", sans-serif';
+    ctx.fillStyle = 'rgba(247,243,233,0.8)';
+    ctx.fillText('The Kaiwi Channel Race', cw/2, by + 92);
+
+    ctx.fillStyle = 'rgba(247,243,233,0.62)';
+    ctx.font = '13px "Lato", sans-serif';
+    const lines = [
+      '↑ W  /  ↓ S  —  steer up & down',
+      '← A  /  → D  —  paddle forward & back',
+      'Dodge rogue waves, jellyfish & sharks',
+      'Collect lei  (+10)  and fish  (+5)',
+    ];
+    lines.forEach((l, i) => ctx.fillText(l, cw/2, by + 128 + i * 22));
+
+    if (Date.now() % 1100 > 500) {
+      ctx.font = 'bold 16px "Lato", sans-serif';
+      ctx.fillStyle = C.teal;
+      ctx.fillText('Press  SPACE  or  Tap  to Begin', cw/2, by + 248);
+    }
+
+    if (best > 0) {
+      ctx.font = '11px "Lato", sans-serif';
+      ctx.fillStyle = 'rgba(247,243,233,0.35)';
+      ctx.fillText(`Best: ${best}`, cw/2, by + 284);
+    }
+  }
+
+  function drawGameOver() {
+    ctx.fillStyle = 'rgba(0,0,0,0.42)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const cw = canvas.width, ch = canvas.height;
+    const bw = Math.min(440, cw - 40), bh = 268;
+    const bx = (cw - bw) / 2, by = (ch - bh) / 2;
+
+    ctx.fillStyle = 'rgba(7,41,106,0.93)';
+    roundRect(bx, by, bw, bh, 14); ctx.fill();
+    ctx.strokeStyle = 'rgba(240,165,0,0.65)';
+    ctx.lineWidth = 2;
+    roundRect(bx, by, bw, bh, 14); ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.font = 'bold italic 46px "Playfair Display", serif';
+    ctx.fillStyle = C.gold;
+    ctx.fillText('Wipeout!', cw/2, by + 62);
+
+    ctx.font = '14px "Lato", sans-serif';
+    ctx.fillStyle = 'rgba(247,243,233,0.72)';
+    ctx.fillText('Your channel run has ended', cw/2, by + 91);
+
+    ctx.font = 'bold 34px "Lato", sans-serif';
+    ctx.fillStyle = C.white;
+    ctx.fillText(`Score: ${score}`, cw/2, by + 142);
+
+    if (score > 0 && score >= best) {
+      ctx.font = 'bold 14px "Lato", sans-serif';
+      ctx.fillStyle = C.gold;
+      ctx.fillText('New Best Score!', cw/2, by + 168);
+    } else {
+      ctx.font = '13px "Lato", sans-serif';
+      ctx.fillStyle = 'rgba(247,243,233,0.5)';
+      ctx.fillText(`Best: ${best}`, cw/2, by + 168);
+    }
+
+    if (Date.now() % 1100 > 500) {
+      ctx.font = 'bold 15px "Lato", sans-serif';
+      ctx.fillStyle = C.teal;
+      ctx.fillText('Press  R  or  Tap  to Race Again', cw/2, by + 228);
+    }
+  }
+
+  // ── Object Factories ───────────────────────────────────────
+  function makeObs(type, x, y) {
+    if (type === 'wave') {
+      const h = 55 + Math.random() * 38;
+      return { type, x, y, w: 40, h, hitW: 34, hitH: h * 0.75, hitOffY: -h * 0.38 };
+    } else if (type === 'jellyfish') {
+      return { type, x, y, w: 48, h: 48, hitW: 40, hitH: 46, hitOffY: -6 };
+    } else {
+      return { type, x, y, w: 58, h: 32, hitW: 52, hitH: 28, hitOffY: 0 };
+    }
+  }
+
+  function makeCol(type, x, y) {
+    return { type, x, y, hitW: 40, hitH: 40, done: false };
+  }
+
+  // ── Spawner ────────────────────────────────────────────────
+  function spawnTick(dt) {
+    spawner.t += dt;
+    if (spawner.t < spawner.interval) return;
+    spawner.t = 0;
+
+    const laneN = 6;
+    const range = P.maxY - P.minY;
+    const laneH = range / laneN;
+
+    let lane  = Math.floor(Math.random() * laneN);
+    let spawnY = P.minY + lane * laneH + laneH * 0.5;
+
+    if (Math.abs(spawnY - lastSpawnY) < 55) {
+      lane   = (lane + 3) % laneN;
+      spawnY = P.minY + lane * laneH + laneH * 0.5;
+    }
+    lastSpawnY = spawnY;
+
+    const sx = canvas.width + 72;
+
+    if (Math.random() < 0.60) {
+      const r = Math.random();
+      const t = r < 0.40 ? 'wave' : r < 0.73 ? 'jellyfish' : 'shark';
+      obstacles.push(makeObs(t, sx, spawnY));
+    } else {
+      collectibles.push(makeCol(Math.random() < 0.58 ? 'lei' : 'fish', sx, spawnY));
+    }
+
+    obstacles    = obstacles.filter(o => o.x > -140);
+    collectibles = collectibles.filter(c => c.x > -140 && !c.done);
+  }
+
+  // ── Collision ──────────────────────────────────────────────
+  function aabb(ax, ay, aw, ah, bx, by, bw, bh) {
+    return Math.abs(ax - bx) < (aw + bw) * 0.5 &&
+           Math.abs(ay - by) < (ah + bh) * 0.5;
+  }
+
+  function checkCollisions() {
+    for (const o of obstacles) {
+      const oy = o.y + o.hitOffY;
+      // Hit if either the main hull OR the ama (outrigger, 47px below) touches the obstacle
+      if (aabb(P.x, P.y,      P.hullHitW, P.hullHitH, o.x, oy, o.hitW, o.hitH) ||
+          aabb(P.x, P.y + 47, P.amaHitW,  P.amaHitH,  o.x, oy, o.hitW, o.hitH)) {
+        gameOver(); return;
+      }
+    }
+    for (const c of collectibles) {
+      if (c.done) continue;
+      if (aabb(P.x, P.y, P.hullHitW + 14, P.hullHitH + 14, c.x, c.y, c.hitW, c.hitH)) {
+        c.done = true;
+        const pts = c.type === 'lei' ? 10 : 5;
+        score += pts;
+        particles.push({ x: c.x, y: c.y - 10, text: `+${pts}`, life: 55, maxLife: 55, vy: -1.4, color: C.gold });
+      }
+    }
+  }
+
+  // ── Update Functions ───────────────────────────────────────
+  function updatePlayer(dt) {
+    if (keys.up)    P.vy -= 0.88 * dt;
+    if (keys.down)  P.vy += 0.88 * dt;
+    if (keys.left)  P.vx -= 0.42 * dt;
+    if (keys.right) P.vx += 0.42 * dt;
+    P.vy *= Math.pow(0.84, dt);
+    P.vx *= Math.pow(0.84, dt);
+    P.y  += P.vy * dt;
+    P.x  += P.vx * dt;
+    P.y   = clamp(P.y, P.minY, P.maxY);
+    P.x   = clamp(P.x, P.minX, P.maxX);
+  }
+
+  function updateRainbow(dt) {
+    rbTimer += dt * 16.67;
+    const cycle = 20000, show = 4000, fade = 600;
+    const ph = rbTimer % cycle;
+    if (ph < show) {
+      rbAlpha = ph < fade ? ph / fade : ph > show - fade ? (show - ph) / fade : 1.0;
+    } else {
+      rbAlpha = 0;
+    }
+  }
+
+  function update(dt) {
+    if (state !== 'PLAYING') return;
+    waveOff  += speed * dt;
+    padAngle += 0.09 * dt;
+    updatePlayer(dt);
+    obstacles.forEach(o => { o.x -= speed * dt; });
+    collectibles.forEach(c => { c.x -= speed * dt; });
+    particles.forEach(p => { p.y += p.vy * dt; p.life -= dt; });
+    particles = particles.filter(p => p.life > 0);
+    clouds.forEach(c => { c.x -= c.s * speed * 0.13 * dt; if (c.x < -80) c.x = canvas.width + 80; });
+    updateRainbow(dt);
+    spawnTick(dt);
+    // Score + difficulty
+    scoreTick += dt;
+    if (scoreTick >= 60) { score++; scoreTick = 0; }
+    speed = Math.min(3.2 + score * 0.013, 9.8);
+    spawner.interval = Math.max(120 - score * 0.27, 50);
+    checkCollisions();
+  }
+
+  // ── Main Draw ──────────────────────────────────────────────
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawSky();
+    drawSun();
+    drawIsland();
+    drawClouds();
+    drawRainbow();
+    WAVES.forEach(drawWave);
+    obstacles.forEach(drawObstacle);
+    collectibles.filter(c => !c.done).forEach(drawCollectible);
+    drawCanoe(P.x, P.y);
+    drawParticles();
+    drawHUD();
+    if (state === 'START')    drawStart();
+    if (state === 'GAMEOVER') drawGameOver();
+  }
+
+  // ── Game Control ───────────────────────────────────────────
+  function startGame() {
+    if (state !== 'START') return;
+    state = 'PLAYING';
+  }
+
+  function gameOver() {
+    if (score > best) { best = score; localStorage.setItem('hoewaa_best', best); }
+    state = 'GAMEOVER';
+  }
+
+  function resetGame() {
+    score = 0; speed = 3.2; scoreTick = 0;
+    obstacles = []; collectibles = []; particles = [];
+    spawner.t = 0; spawner.interval = 120;
+    P.x = canvas.width * 0.17; P.vx = 0;
+    P.y = canvas.height * 0.54; P.vy = 0;
+    rbTimer = 0; rbAlpha = 0; lastSpawnY = -999;
+    state = 'PLAYING';
+  }
+
+  // ── Input ──────────────────────────────────────────────────
+  document.addEventListener('keydown', e => {
+    if (e.code === 'ArrowUp'    || e.code === 'KeyW') { keys.up    = true;  e.preventDefault(); }
+    if (e.code === 'ArrowDown'  || e.code === 'KeyS') { keys.down  = true;  e.preventDefault(); }
+    if (e.code === 'ArrowLeft'  || e.code === 'KeyA') { keys.left  = true;  e.preventDefault(); }
+    if (e.code === 'ArrowRight' || e.code === 'KeyD') { keys.right = true;  e.preventDefault(); }
+    if (e.code === 'Space'  && state === 'START')    { startGame();          e.preventDefault(); }
+    if (e.code === 'KeyR'   && state === 'GAMEOVER') { resetGame();          e.preventDefault(); }
+  });
+  document.addEventListener('keyup', e => {
+    if (e.code === 'ArrowUp'    || e.code === 'KeyW') keys.up    = false;
+    if (e.code === 'ArrowDown'  || e.code === 'KeyS') keys.down  = false;
+    if (e.code === 'ArrowLeft'  || e.code === 'KeyA') keys.left  = false;
+    if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+  });
+
+  canvas.addEventListener('touchstart', e => {
+    touchY0 = e.touches[0].clientY;
+    touchX0 = e.touches[0].clientX;
+    if (state === 'START')    startGame();
+    if (state === 'GAMEOVER') resetGame();
+    e.preventDefault();
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    const dy = e.touches[0].clientY - touchY0;
+    const dx = e.touches[0].clientX - touchX0;
+    keys.up    = dy < -14;
+    keys.down  = dy >  14;
+    keys.left  = dx < -14;
+    keys.right = dx >  14;
+  }, { passive: false });
+
+  canvas.addEventListener('touchend', () => {
+    keys.up = keys.down = keys.left = keys.right = false;
+  });
+
+  // ── Loop ───────────────────────────────────────────────────
+  function loop(ts) {
+    const dt = lastTS ? clamp((ts - lastTS) / 16.67, 0.1, 3) : 1;
+    lastTS = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // ── Init ───────────────────────────────────────────────────
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
